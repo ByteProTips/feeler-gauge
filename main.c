@@ -1,7 +1,7 @@
 /**
  * @file main.c
  * @author Nathan McFadden <nmcfadd2@andrew.cmu.edu>
- * @brief 
+ * @brief Feeler Gauge 
  * @version 0.1
  * @date 2022-03-02
  * 
