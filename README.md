@@ -1,1 +1,1 @@
-# feeler-guage
+# feeler-gauge
