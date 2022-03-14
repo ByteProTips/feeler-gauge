@@ -77,7 +77,7 @@ int verify_fs_arg(struct cmd_line *args){
         args->fs_type = NTFS;
         return 0;
     }
-    if (!strncmp("raw", args->file_system, 4)){
+    if (!strncmp("raw", args->file_system, 3)){
         args->fs_type = RAW;
         return 0;
     }
@@ -152,16 +152,44 @@ int read_mbr_sector(int fp, struct mbr_sector *mbr){
                 continue;
         }
     }
-    // malloc_mbr(&mbr, extended_found, &extended_entry);
     return 0;
 }
 
 
 /**
+ * @brief Runs a series of calculations to determine FAT File System Type.  Can differentiate
+ * between FAT12, FAT16, and FAT32.  Formula based on page 229 of File System Forensic Analysis 
+ * book by Brian Carrier
+ * 
+ * @param fat_sector 
+ */
+void calc_fat_type(struct fat_boot_sector *fat_sector){
+    uint32_t root_dir_sectors = ((fat_sector->max_files_in_root * 32) + (bps - 1)) / bps;
+    uint32_t sectors_to_clusters;
+    if (fat_sector->sector_count_16b)
+        sectors_to_clusters = fat_sector->sector_count_16b - fat_sector->reserved_area_size - (fat_sector->number_of_fats * fat_sector->fat_size_in_sectors) - root_dir_sectors;
+    else
+        sectors_to_clusters = fat_sector->sector_count_32b - fat_sector->reserved_area_size - (fat_sector->number_of_fats * fat_sector->fat_size_in_sectors) - root_dir_sectors;
+    
+    uint32_t final_value = sectors_to_clusters/fat_sector->sectors_per_cluster;
+
+    if (final_value < 4085)
+        fat_sector->is_fat12 = true;
+    if (final_value >= 4085 && final_value < 65525)
+        fat_sector->is_fat16 = true;
+    if (final_value >= 65525)
+        fat_sector->is_fat32 = true;
+    // printf("Sectors in Root Dir: %d\n", root_dir_sectors);
+    // printf("Sectors allocated to clusters: %ju\n", sectors_to_clusters/fat_sector->sectors_per_cluster);
+}
+
+/**
  * @brief 
  * 
  * @param fp 
- * @param mbr 
+ * @param mbr
+ * @param partition_offset If a raw/full disk image is used, this is
+ * the offset within the disk image to the FAT boot sector
  * @return int 
  */
 int read_fat_boot_sector(int fp, struct fat_boot_sector *fat_sector, int partition_offset){
@@ -229,7 +257,7 @@ int read_fat_boot_sector(int fp, struct fat_boot_sector *fat_sector, int partiti
         read_error();
     
     // Get Volume Serial
-    if (pread(fp, &fat_sector->volume_serial, 4, partition_offset + RESERVED_AREA_SIZE) < 0)
+    if (pread(fp, &fat_sector->volume_serial, 4, partition_offset + VOLUME_SERIAL) < 0)
         read_error();
     
     // Get Volume Label
@@ -245,10 +273,14 @@ int read_fat_boot_sector(int fp, struct fat_boot_sector *fat_sector, int partiti
     // Get File System Signature
     if (pread(fp, &fat_sector->fs_signature, 2, partition_offset + FS_SIGNATURE) < 0)
         read_error();
-    
+
+    //Write Global VAR 'bps' - shortcut for Bytes Per Sector
+    bps = fat_sector->bytes_per_sector;
+    // Determine FAT Type (i.e. FAT12, FAT16, or FAT32)
+    calc_fat_type(fat_sector);
+
     // If FAT32 is detected, read in extended FAT32 fields
-    if (!fat_sector->fat_size_in_sectors){
-        fat_sector->is_fat32 = true;
+    if (fat_sector->is_fat32){
 
         // Get FAT32 Size in Sectors
         if (pread(fp, &fat_sector->fat32_size_in_sectors, 4, partition_offset + FAT32_SIZE_IN_SECTORS) < 0)
@@ -304,21 +336,21 @@ int read_fat_boot_sector(int fp, struct fat_boot_sector *fat_sector, int partiti
  */
 void validate_fat_boot_sector(struct fat_boot_sector *fat_sector){
     // Check that Bytes Per Sector is Valid
-    switch (fat_sector->bytes_per_sector)
-    {
-    case 512:
-        break;
-    case 1024:
-        break;
-    case 2048:
-        break;
-    case 4096:
-        break;
-    default:
-        fprintf(stderr, "\nError!  Detected bytes per sector of: %d which is invalid.  \
-        Must be 512, 1024, 2048, or 4096.  This indicates the disk image or file system might be corrupted", fat_sector->bytes_per_sector);
-        exit(EXIT_FAILURE);
-        break;
+    switch (bps){
+        case 512:
+            break;
+        case 1024:
+            break;
+        case 2048:
+            break;
+        case 4096:
+            break;
+        default:
+            fprintf(stderr, "\nError!  Detected bytes per sector of: %d which is invalid."  \
+            "Must be 512, 1024, 2048, or 4096.  This indicates the disk image or file system might be corrupted", 
+            bps);
+            exit(EXIT_FAILURE);
+            break;
     }
 
     // Check that Sectors Cluster is a Power of 2 and less than 32KB
@@ -328,9 +360,9 @@ void validate_fat_boot_sector(struct fat_boot_sector *fat_sector){
                 This indicates the disk image or file system might be corrupted", sec_per_clus);
         exit(EXIT_FAILURE);
     }
-    if (sec_per_clus * fat_sector->bytes_per_sector > 32768){
+    if (sec_per_clus * bps > 32768){
         fprintf(stderr, "\nError!  Detected sector size of: %d which is invalid.  It must be a power of 2.  \
-                This indicates the disk image or file system might be corrupted", sec_per_clus * fat_sector->bytes_per_sector);
+                This indicates the disk image or file system might be corrupted", sec_per_clus * bps);
         exit(EXIT_FAILURE);
     }
 
@@ -346,7 +378,7 @@ void validate_fat_boot_sector(struct fat_boot_sector *fat_sector){
     }
 
     // Check media type
-    if (fat_sector->media_type != FIXED || fat_sector->media_type == REMOVABLE)
+    if (fat_sector->media_type != FIXED && fat_sector->media_type != REMOVABLE)
         fprintf(stderr, "\nWarning!  Media type (removable/fixed) could not be detected.  The disk image or file system might be corrupted, proceed with caution.");
 
     // Check that only one sector count is present (16 bits for FAT12/FAT16, or 32 bits for FAT32)
@@ -408,11 +440,16 @@ int verify_disk_image(int fp, struct cmd_line *args){
             if (args->fs_type != FAT32)
                 fs_mismatch("fat32");
             return FAT32;
-        case FAT_SIG:
+        case FAT16_SIG:
             // printf("Detected FAT12/FAT16 Partition.\n\n");
-            if (args->fs_type != FAT16 && args->fs_type != FAT12)
-                fs_mismatch("fat12 or fat16");
+            if (args->fs_type != FAT16 )
+                fs_mismatch("fat16");
             return FAT16;
+        case FAT12_SIG:
+            // printf("Detected FAT12/FAT16 Partition.\n\n");
+            if (args->fs_type != FAT12 )
+                fs_mismatch("fat12");
+            return FAT12;
         default:
             // printf("Detected a possible disk image with MBR (aka use -f raw)\n\n");
             if (args->fs_type != RAW)
@@ -424,13 +461,20 @@ int verify_disk_image(int fp, struct cmd_line *args){
     return 0;
 }
 
+/**
+ * @brief Prints out information parsed from Fat Boot Sector
+ * 
+ * @param fat_sector 
+ */
 void print_fat_boot_sector_info(struct fat_boot_sector *fat_sector){
     printf("\nFAT File System Information\n\n");
     
     if (fat_sector->is_fat32)
         printf("File System Type: FAT32\n");
-    else
-        printf("File System Type: FAT12/16\n");
+    if (fat_sector->is_fat16)
+        printf("File System Type: FAT16\n");
+    if (fat_sector->is_fat12)
+        printf("File System Type: FAT12\n");
 
     switch (fat_sector->media_type){
         case FIXED:
@@ -451,11 +495,11 @@ void print_fat_boot_sector_info(struct fat_boot_sector *fat_sector){
         printf("File System Label: %s\n", fat_sector->fat32_fs_type_label);
     }
     else{
-        printf("Volume Serial: %d\n", fat_sector->volume_serial);
+        printf("Volume Serial: %ju\n", (uintmax_t)fat_sector->volume_serial);
         printf("Volume Label: %s\n", fat_sector->volume_label);
         printf("File System Label: %s\n", fat_sector->fs_type_label);
     }
-    printf("Bytes per sector: %d\n", fat_sector->bytes_per_sector);
+    printf("Bytes per sector: %d\n", bps);
     printf("Sectors per cluster: %d\n", fat_sector->sectors_per_cluster);
     printf("Size of Reserved Area (in sectors): %d\n", fat_sector->reserved_area_size);
     printf("Number of FATs: %d\n", fat_sector->number_of_fats);
@@ -477,26 +521,75 @@ void print_fat_boot_sector_info(struct fat_boot_sector *fat_sector){
     }
 }
 
+/**
+ * @brief Prints out information parsed from MBR
+ * 
+ * @param mbr 
+ */
 void print_mbr_info(struct mbr_sector *mbr){
     // print out the headers first
     printf("%-8s %-4s %12s %12s %12s   %4s   %-25s\n", header[0], header[1], header[2], header[3], header[4], header[5], header[6]);
 
     for (int i = 0; i < 4; i++){
-        uint8_t boot_ind = mbr->entry[i].boot_indicator;
-        uint8_t part_type = mbr->entry[i].partition_type;
-        uint32_t starting_sector = mbr->entry[i].starting_sector;
-        uint32_t partition_size = mbr->entry[i].partition_size;
-
         char bootable;
 
-        if (boot_ind == 0)
+        if (mbr->entry[i].boot_indicator == 0)
             bootable = 'N';
         else
             bootable = 'Y';
 
-        printf("%-8d %-4c %12ju %12ju %12ju   %#04x   %-25s\n", i, bootable, (uintmax_t)starting_sector, (uintmax_t)(starting_sector + partition_size), (uintmax_t)partition_size, part_type, partition_type_txt[part_type]);
+        printf("%-8d %-4c %12ju %12ju %12ju   %#04x   %-25s\n", 
+        i, bootable, (uintmax_t)mbr->entry[i].starting_sector, 
+        (uintmax_t)(mbr->entry[i].starting_sector + mbr->entry[i].partition_size), 
+        (uintmax_t)mbr->entry[i].partition_size, mbr->entry[i].partition_type, 
+        partition_type_txt[mbr->entry[i].partition_type]);
     }
 }
+
+/**
+ * @brief Copies the FATs from the disk image into memory, and then compares them to see
+ * if there are any differences between FAT1 and FAT2
+ * 
+ * @param fp file pointer to disk image
+ * @param fs_type type of file system (enum)
+ * @param fat_boot_sector 
+ * @param fat1 
+ * @param fat2 
+ */
+void copy_fats_into_memory(int fp, int fs_type, struct fat_boot_sector* fat_sector, uint8_t *fat1, uint8_t *fat2){
+    uint64_t diff = 0;
+    uint32_t reserved_area_size_in_bytes = 0;
+    uint32_t fat_size_in_bytes = 0;
+
+    reserved_area_size_in_bytes = fat_sector->reserved_area_size * bps;
+
+    if (fs_type == FAT32)
+        fat_size_in_bytes = fat_sector->fat32_size_in_sectors * bps;
+    else
+        fat_size_in_bytes = fat_sector->fat_size_in_sectors * bps;
+
+    fat1 = malloc(fat_size_in_bytes);
+    fat2 = malloc(fat_size_in_bytes);
+
+    if (pread(fp, fat1, fat_size_in_bytes, reserved_area_size_in_bytes) < 0)
+        read_error();
+    if (pread(fp, fat2, fat_size_in_bytes, reserved_area_size_in_bytes + fat_size_in_bytes) < 0)
+        read_error();
+
+    for(int i = 0; i < fat_size_in_bytes; i++){
+        if (fat1[i] ^ fat2[i]){
+            diff++;
+            if (diff <= 10){
+                printf("Detected discrepency between FAT1 and FAT2 at the following offsets.  FAT1: %#2x, FAT2: %#02x\n", 
+                reserved_area_size_in_bytes + i, reserved_area_size_in_bytes + fat_size_in_bytes + i);
+            }
+        }
+        if (diff == 11)
+            printf("More than 10 discrepencies between FAT1 and FAT2 detected.  To reduce output clutter, individual discrepencies will no longer be printed.\n");
+    }
+    printf("Total # of discrepencies identified between FAT1 and FAT2: %ju\n", diff);
+}
+
 
 /**
  * @brief 
@@ -510,7 +603,9 @@ int main(int argc, char *argv[]){
     int fp = 0;
     int fs_type = 0;
     struct mbr_sector* mbr = calloc(1, sizeof(struct mbr_sector));
-    struct fat_boot_sector* fat_boot_sector;
+    struct fat_boot_sector* fat_bs;
+    uint8_t *fat1 = 0;
+    uint8_t *fat2 = 0;
 
     read_args(&args, argc, argv);
     verify_fs_arg(&args);
@@ -525,10 +620,43 @@ int main(int argc, char *argv[]){
     }
 
     if (fs_type == FAT32 || fs_type == FAT16 || fs_type == FAT12){
-        fat_boot_sector = calloc(1, sizeof(struct fat_boot_sector));
-        read_fat_boot_sector(fp, fat_boot_sector, 0);
-        validate_fat_boot_sector(fat_boot_sector);
-        print_fat_boot_sector_info(fat_boot_sector);
+        fat_bs = calloc(1, sizeof(struct fat_boot_sector));
+        read_fat_boot_sector(fp, fat_bs, 0);
+        validate_fat_boot_sector(fat_bs);
+        print_fat_boot_sector_info(fat_bs);
+        copy_fats_into_memory(fp, fs_type, fat_bs, fat1, fat2);
+
+        uint32_t root_dir_off = fat_bs->reserved_area_size * bps + (fat_bs->fat32_size_in_sectors * bps * fat_bs->number_of_fats);
+        printf("Root Dir Offset: %x\n", root_dir_off);
+        struct fat_dir_entry root_dir = {0};
+        if (pread(fp, root_dir.name_alloc.filename, 11, root_dir_off + FILE_NAME) < 0)
+            read_error();
+        if (pread(fp, &root_dir.file_attributes, 1, root_dir_off + FILE_ATTRIBUTES) < 0)
+            read_error();
+        if (pread(fp, &root_dir.created_time_tenths, 1, root_dir_off + CREATED_TIME_TENTHS) < 0)
+            read_error();
+        if (pread(fp, &root_dir.created_time_hms, 2, root_dir_off + CREATED_TIME_HMS) < 0)
+            read_error();
+        if (pread(fp, &root_dir.created_day, 2, root_dir_off + CREATED_DAY) < 0)
+            read_error();
+        if (pread(fp, &root_dir.accessed_day, 2, root_dir_off + ACCESSED_DAY) < 0)
+            read_error();
+        if (pread(fp, &root_dir.cluster_addr, 2, root_dir_off + LOW_CLUSTER_ADDR) < 0)
+            read_error();
+        if (pread(fp, &root_dir.cluster_addr + 2, 2, root_dir_off + HIGH_CLUSTER_ADDR) < 0)
+            read_error();
+        if (pread(fp, &root_dir.written_time_hms, 2, root_dir_off + WRITTEN_TIME_HMS) < 0)
+            read_error();
+        if (pread(fp, &root_dir.written_day, 2, root_dir_off + WRITTEN_DAY) < 0)
+            read_error();
+        if (pread(fp, &root_dir.file_size, 4, root_dir_off + FILE_SIZE) < 0)
+            read_error();
+
+        printf("Root Dir Alloc Status: %#02x\n", root_dir.name_alloc.alloc_status);
+        printf("Root Dir File Name: %s\n", root_dir.name_alloc.filename);
+        printf("Root Dir File Attributes: %#02x\n", root_dir.file_attributes);
+        printf("Root Dir Cluster Address: %#02x\n", root_dir.cluster_addr);
+        printf("Root Dir Size: %#02x\n", root_dir.file_size);
     }
 
     CLEANUP:
@@ -536,7 +664,12 @@ int main(int argc, char *argv[]){
         close(fp); // close file
     if (mbr != NULL)
         free(mbr);
-    if (fat_boot_sector != NULL)
-        free(fat_boot_sector);
+    if (fat_bs != NULL)
+        free(fat_bs);
+    if (fat1 != NULL)
+        free(fat1);
+    if (fat2 != NULL)
+        free(fat2);
+    
     //Need to add code to cleanup MBR Table structs
 }

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <math.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -25,6 +26,9 @@ const char header[7][10] = {
     "ID",
     "TYPE"
 };
+
+uint32_t bps = 0; // Bytes Per Sector
+
 /**
  * @brief Common partition type codes for MBR entries
  */
@@ -97,7 +101,30 @@ enum offsets {
     FAT32_EXTENDED_BOOT_SIG = 66,
     FAT32_VOLUME_SERIAL= 67,
     FAT32_VOLUME_LABEL =  71,
-    FAT32_FS_TYPE_LABEL = 82
+    FAT32_FS_TYPE_LABEL = 82,
+
+    // FAT Directory Entry
+    ALLOCATION_STATUS = 0,
+    FILE_NAME = 0,
+    FILE_ATTRIBUTES = 11,
+    CREATED_TIME_TENTHS = 13,
+    CREATED_TIME_HMS = 14,
+    CREATED_DAY = 16,
+    ACCESSED_DAY = 18,
+    HIGH_CLUSTER_ADDR = 20,
+    WRITTEN_TIME_HMS = 22,
+    WRITTEN_DAY = 24,
+    LOW_CLUSTER_ADDR = 26,
+    FILE_SIZE = 28,
+
+    // FAT Flag Values
+    FLAG_FAT_READ_ONLY = 0x1,
+    FLAG_FAT_HIDDEN_FILE = 0x2,
+    FLAG_FAT_SYSTEM_FILE = 0x3,
+    FLAG_FAT_VOLUME_LABEL = 0x8,
+    FLAG_FAT_LONG_FILE_NAME = 0x0F,
+    FLAG_FAT_DIRECTORY = 0x10,
+    FLAG_FAT_ARCHIVE = 0x20
 };
 
 enum media_types{
@@ -111,7 +138,8 @@ enum media_types{
 enum signatures {
     MBR_SIG = 0x55AA,
     NTFS_SIG = 0xEB5290,
-    FAT_SIG = 0xEB3C90,
+    FAT12_SIG = 0xEB3F90,
+    FAT16_SIG = 0xEB3C90,
     FAT32_SIG = 0xEB5890
 };
 
@@ -157,6 +185,9 @@ typedef struct mbr_sector {
 // Struct to store FAT Boot Sector fields
 typedef struct fat_boot_sector {
     bool is_fat32;
+    bool is_fat16;
+    bool is_fat12;
+    
     char oem_name[9];
     uint16_t bytes_per_sector;
     uint8_t sectors_per_cluster;
@@ -191,6 +222,22 @@ typedef struct fat_boot_sector {
     char fat32_fs_type_label[9];
 
 } fat_boot_sector;
+
+typedef struct fat_dir_entry{
+    union {
+        char alloc_status;
+        char filename[12];
+    } name_alloc;
+    uint8_t file_attributes;
+    uint8_t created_time_tenths;
+    uint16_t created_time_hms;
+    uint16_t created_day;
+    uint16_t accessed_day;
+    uint32_t cluster_addr;
+    uint16_t written_time_hms;
+    uint16_t written_day;
+    uint32_t file_size; // in bytes
+} fat_dir_entry;
 
 
 /**
