@@ -27,7 +27,6 @@ uint32_t cts(uint32_t cluster){
     return ((cluster - 2) * (spc * bps) + reserved_and_fats);
 }
 
-
 /**
  * @brief Parses cmd line arguments
  * 
@@ -45,7 +44,7 @@ int read_args(struct cmd_line *args, int argc, char *argv[]) {
 
     strncpy(args->argv0, argv[0], 255);
 
-    while ((opt = getopt(argc, argv, "i:f:t:")) != -1) {
+    while ((opt = getopt(argc, argv, "i:f:v")) != -1) {
         switch (opt) {
         case 'i':
             args->i_flag = true;
@@ -58,10 +57,23 @@ int read_args(struct cmd_line *args, int argc, char *argv[]) {
                 args->file_system[i] = tolower(args->file_system[i]);
             }
             break;
+        case 'v':
+            args->v_flag = true;
+            break;
         default:
             fprintf(stderr, "\nUsage: %s %s", argv[0], cmd_line_error);
             exit(EXIT_FAILURE);
         }
+    }
+    if (args->i_flag == false){
+        fprintf(stderr, "\nError! You must specify a disk image. < -i >\n");
+    }
+    if (args->f_flag == false){
+        fprintf(stderr, "\nError! You must specify the format of the disk image.  < -f >\n");
+    }
+    if (args->f_flag == false || args->i_flag == false){
+        fprintf(stderr, "\nUsage: %s %s", argv[0], cmd_line_error);
+            exit(EXIT_FAILURE);
     }
     return 0;
 }
@@ -522,6 +534,12 @@ void print_full_fat_tables(uint8_t* fat1_ptr, uint8_t* fat2_ptr, struct fat_boot
         fat_banner = fat32_banner;
     }
 
+    if (fat_sector->is_fat12){
+        //Need to implement special logic for fat12 since 12 bits does not fit cleanly into a normal c datatype.
+        return;
+    }
+
+
     void print_dash(){
         printf("%.*s", 13, space);
         printf("%.*s\n", dash_width, dash);
@@ -622,12 +640,12 @@ void print_fat_boot_sector_info(struct fat_boot_sector *fat_sector){
     
     printf("OEM Name: %s\n", fat_sector->oem_name);
     if(fat_sector->is_fat32){
-        printf("Volume Serial: %d\n", fat_sector->fat32_volume_serial);
+        printf("Volume Serial: 0x%zx\n", (size_t)fat_sector->fat32_volume_serial);
         printf("Volume Label: %s\n", fat_sector->fat32_volume_label);
         printf("File System Label: %s\n", fat_sector->fat32_fs_type_label);
     }
     else{
-        printf("Volume Serial: %ju\n", (uintmax_t)fat_sector->volume_serial);
+        printf("Volume Serial: 0x%zx\n", (size_t)fat_sector->volume_serial);
         printf("Volume Label: %s\n", fat_sector->volume_label);
         printf("File System Label: %s\n", fat_sector->fs_type_label);
     }
@@ -725,58 +743,135 @@ void copy_fats_into_memory(int fp, int fs_type, struct fat_boot_sector* fat_sect
         printf("Total # of discrepencies identified between FAT1 and FAT2: %ju\n", diff);
 }
 
+
+/**
+ * @brief Function traverses Long File Name (LFN) entires within the FAT32 file system to find the Short
+ * File Name (SFN) entry which actually contains the information like time stamps, size, and first cluster.
+ * 
+ * @param fp File Pointer to the disk image
+ * @return uint32_t The offset to the short file name record
+ */
+uint32_t traverse_lfn_entries(int fp, uint32_t offset){
+    uint32_t current_lfn_offset = 0;
+    uint32_t current_entry_attribute = 0;
+    do{
+        if (pread(fp, &current_entry_attribute, 1, offset + FILE_ATTRIBUTES + current_lfn_offset) < 0)
+            read_error();
+        current_lfn_offset += 32; //increment to the next directory entry
+    } while (current_entry_attribute == FLAG_FAT_LONG_FILE_NAME);
+    return (current_lfn_offset - 32);
+}
+
 /**
  * @brief Returns the value stored within a given FAT table entry
  * 
- * @param entry 
- * @param fat 
- * @param fat_bs 
+ * @param cluster entry to be read 
  * @return uint32_t 
  */
-uint32_t read_fat_entry(uint32_t entry, uint8_t *fat, struct fat_boot_sector* fat_bs){
+
+uint32_t read_fat_entry(uint32_t cluster){
     if (fat_bs->is_fat32){
-        uint32_t *fat32 = (uint32_t *)fat;
-        return fat32[entry];
+        uint32_t *fat32 = (uint32_t *) fat1;
+        return fat32[cluster];
     }
     if (fat_bs->is_fat16){
-        uint16_t *fat16 = (uint16_t *)fat;
-        return fat16[entry];
+        uint16_t *fat16 = (uint16_t *) fat1;
+        return fat16[cluster];
     }
-    else
-        exit(0);
+    return 0;
 }
 
-void read_fat_root_dir(int fp, struct fat_dir_entry *root_dir){
-    if (pread(fp, root_dir->info.filename, 11, root_dir_off + FILE_NAME) < 0)
+/**
+ * @brief Loads a fat_dir_entry struct with directory entry info
+ * 
+ * @param fp file pointer to disk image
+ * @param entry pointer to entry struct to store read information
+ * @param offset 
+ * @return uint32_t 
+ */
+uint32_t read_fat_dir_entry(int fp, struct fat_dir_entry *entry, uint32_t offset){
+    // Traverse the LFN entries to get to the SFN entry
+    uint32_t LFN = traverse_lfn_entries(fp, offset);
+
+    if (pread(fp, entry->info.filename, 11, offset + LFN + FILE_NAME) < 0)
         read_error();
-    if (pread(fp, &root_dir->file_attributes, 1, root_dir_off + FILE_ATTRIBUTES) < 0)
+    if (pread(fp, &entry->file_attributes, 1, offset + LFN + FILE_ATTRIBUTES) < 0)
         read_error();
-    if (pread(fp, &root_dir->created_time_tenths, 1, root_dir_off + CREATED_TIME_TENTHS) < 0)
+    if (pread(fp, &entry->created_time_tenths, 1, offset + LFN + CREATED_TIME_TENTHS) < 0)
         read_error();
-    if (pread(fp, &root_dir->created_time_hms, 2, root_dir_off + CREATED_TIME_HMS) < 0)
+    if (pread(fp, &entry->created_time_hms, 2, offset + LFN + CREATED_TIME_HMS) < 0)
         read_error();
-    if (pread(fp, &root_dir->created_day, 2, root_dir_off + CREATED_DAY) < 0)
+    if (pread(fp, &entry->created_day, 2, offset + LFN + CREATED_DAY) < 0)
         read_error();
-    if (pread(fp, &root_dir->accessed_day, 2, root_dir_off + ACCESSED_DAY) < 0)
+    if (pread(fp, &entry->accessed_day, 2, offset + LFN + ACCESSED_DAY) < 0)
         read_error();
-    if (pread(fp, &root_dir->low_cluster_addr, 2, root_dir_off + LOW_CLUSTER_ADDR) < 0)
+    if (pread(fp, &entry->low_cluster_addr, 2, offset + LFN + LOW_CLUSTER_ADDR) < 0)
         read_error();
-    if (pread(fp, &root_dir->high_cluster_addr, 2, root_dir_off + HIGH_CLUSTER_ADDR) < 0)
-        read_error();
-    root_dir->cluster_addr = root_dir->low_cluster_addr | (root_dir->high_cluster_addr << 16);
-    if (pread(fp, &root_dir->written_time_hms, 2, root_dir_off + WRITTEN_TIME_HMS) < 0)
-        read_error();
-    if (pread(fp, &root_dir->written_day, 2, root_dir_off + WRITTEN_DAY) < 0)
-        read_error();
-    if (pread(fp, &root_dir->file_size, 4, root_dir_off + FILE_SIZE) < 0)
+    if (pread(fp, &entry->high_cluster_addr, 2, offset + LFN + HIGH_CLUSTER_ADDR) < 0)
         read_error();
 
-    printf("Root Dir Offset: %#0x\n", root_dir_off);
-    printf("Root Dir Alloc Status: %#02x\n", root_dir->info.alloc_status);
-    printf("Root Dir File Name: %s\n", root_dir->info.filename);
-    printf("Root Dir File Attributes: %#02x\n", root_dir->file_attributes);
-    printf("Root Dir Cluster Address: %#08x\n", root_dir->cluster_addr);
-    printf("Root Dir Size: %#08x\n", root_dir->file_size);
+    entry->cluster_addr = entry->low_cluster_addr | (entry->high_cluster_addr << 16);
+    
+    if (pread(fp, &entry->written_time_hms, 2, offset + LFN + WRITTEN_TIME_HMS) < 0)
+        read_error();
+    if (pread(fp, &entry->written_day, 2, offset + LFN + WRITTEN_DAY) < 0)
+        read_error();
+    if (pread(fp, &entry->file_size, 4, offset + LFN + FILE_SIZE) < 0)
+        read_error();
+    return LFN + 32;
+}
+
+/**
+ * @brief Returns the number of clusters a file or directory takes up on the disk.  It does this by
+ * traversing the FAT until it hits an EOF marker.
+ * 
+ * @param cluster 
+ * @return uint32_t 
+ */
+uint32_t get_entry_size(uint32_t cluster){
+    uint32_t next_cluster = cluster;
+    uint32_t size = 1;
+
+    if(fat_bs->is_fat32){
+        do{
+            next_cluster = read_fat_entry(next_cluster);
+            size++;
+        } while (next_cluster < (uint32_t)FAT32_EOF);
+    }
+    return size;
+}
+
+/**
+ * @brief Returns the clusters a file or directory occupies up on the disk.  It does this by
+ * traversing the FAT until it hits an EOF marker.
+ * 
+ * @param cluster The starting cluster
+ * @param cluster_list A poiner to a block/array to store the list of clusters
+ * @param max_length Since we pre-allocated memory for the list, this is a safety check to avoid overrunning the buffer
+ * @return uint32_t 
+ */
+void get_fat32_entry_clusters(uint32_t cluster, uint32_t *cluster_list, uint32_t max_length){
+    uint32_t next_cluster = cluster;
+    uint32_t size = 0;
+    do{
+        cluster_list[size] = next_cluster;
+        next_cluster = read_fat_entry(next_cluster);
+        //printf("Next Cluster: %zu\n", next_cluster);
+        size++;
+    } while (next_cluster < FAT32_EOF && size < max_length);
+}
+
+struct fat_dir_entry* read_fat32_filesystem(int fp, uint32_t entry_start_cluster){    
+    uint32_t dir_size = get_entry_size(entry_start_cluster);
+    uint32_t *dir_cluster_list = calloc(dir_size, sizeof(uint32_t));
+    struct fat_dir_entry *entry = calloc(1, sizeof(struct fat_dir_entry));
+    get_fat32_entry_clusters(entry_start_cluster, dir_cluster_list, dir_size);
+    
+    entry->last_cluster = dir_cluster_list[dir_size-1];
+
+
+    free(dir_cluster_list);
+    return entry;
 }
 
 
@@ -791,10 +886,8 @@ int main(int argc, char *argv[]){
     cmd_line args = {0};
     int fp = 0;
     int fs_type = 0;
+    root_dir_off = 0;
     struct mbr_sector* mbr = calloc(1, sizeof(struct mbr_sector));
-    struct fat_boot_sector* fat_bs;
-    uint8_t *fat1;
-    uint8_t *fat2;
 
     read_args(&args, argc, argv);
     verify_fs_arg(&args);
@@ -810,26 +903,25 @@ int main(int argc, char *argv[]){
 
     if (fs_type == FAT32 || fs_type == FAT16 || fs_type == FAT12){
         fat_bs = calloc(1, sizeof(struct fat_boot_sector));
-        struct fat_dir_entry root_dir = {0};
+        struct fat_dir_entry *root_dir;
         read_fat_boot_sector(fp, fat_bs, 0);
         validate_fat_boot_sector(fat_bs);
         print_fat_boot_sector_info(fat_bs);
         copy_fats_into_memory(fp, fs_type, fat_bs, &fat1, &fat2);
-        if (fs_type == FAT16)
-            print_full_fat_tables(fat1, fat2, fat_bs);
-        if (fs_type == FAT32)
+        
+        if (args.v_flag == true) //print fat table in verbose mode
             print_full_fat_tables(fat1, fat2, fat_bs);
 
-        if(fs_type == FAT32)
-            // root_dir_off = fat_bs->reserved_area_size * bps + (fat_bs->fat32_size_in_sectors * bps * fat_bs->number_of_fats);
-            // root_dir_off = ((fat_bs->root_dir_cluster - 2) * fat_bs->sectors_per_cluster * bps) + (fat_bs->reserved_area_size * bps) + (fat_bs->fat32_size_in_sectors * bps * fat_bs->number_of_fats);
+        if(fs_type == FAT32){
             root_dir_off = cts(fat_bs->root_dir_cluster);
-        else
+            cluster2_off = reserved_and_fats;
+            printf("Starting to read Fat32 filesystem.\n");
+            root_dir = read_fat32_filesystem(fp, fat_bs->root_dir_cluster);
+        }
+        if(fs_type == FAT16){
             root_dir_off = fat_bs->number_of_fats * (fat_bs->fat_size_in_sectors * bps) + (fat_bs->reserved_area_size * bps);
-        
-        read_fat_root_dir(fp, &root_dir);
-        
-        printf("Cluster 2: %x\n", read_fat_entry(2, fat1, fat_bs));
+            cluster2_off = reserved_and_fats + fat_bs->max_files_in_root * 32;
+        }
     }
 
     CLEANUP:
