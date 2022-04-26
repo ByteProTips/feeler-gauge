@@ -12,16 +12,12 @@
 
 #include "main.h"
 
-void read_error(void) {
-    fprintf(stderr, "Unable to read disk image. Please make sure the file has not been moved or deleted.\n");
-    exit(EXIT_FAILURE);
-}
-
-
+cmd_line args = {0};
+bool hidden_data_found = false;
 /**
  * @brief Convert Cluster to Sector
  * 
- * @return uint32_t 
+ * @return uint32_t sector
  */
 uint32_t cts(uint32_t cluster){
     return ((cluster - 2) * (spc * bps) + reserved_and_fats);
@@ -44,7 +40,7 @@ int read_args(struct cmd_line *args, int argc, char *argv[]) {
 
     strncpy(args->argv0, argv[0], 255);
 
-    while ((opt = getopt(argc, argv, "i:f:v")) != -1) {
+    while ((opt = getopt(argc, argv, "i:f:v:h")) != -1) {
         switch (opt) {
         case 'i':
             args->i_flag = true;
@@ -59,6 +55,9 @@ int read_args(struct cmd_line *args, int argc, char *argv[]) {
             break;
         case 'v':
             args->v_flag = true;
+            break;
+        case 'h':
+            args->h_flag = true;
             break;
         default:
             fprintf(stderr, "\nUsage: %s %s", argv[0], cmd_line_error);
@@ -709,7 +708,7 @@ void print_mbr_info(struct mbr_sector *mbr){
 void copy_fats_into_memory(int fp, int fs_type, struct fat_boot_sector* fat_sector, uint8_t **fat1_ptr, uint8_t **fat2_ptr){
     uint64_t diff = 0;
     uint32_t reserved_area_size_in_bytes = 0;
-    uint32_t fat_size_in_bytes = 0;
+    fat_size_in_bytes = 0;
 
     reserved_area_size_in_bytes = fat_sector->reserved_area_size * bps;
 
@@ -718,8 +717,8 @@ void copy_fats_into_memory(int fp, int fs_type, struct fat_boot_sector* fat_sect
     else
         fat_size_in_bytes = fat_sector->fat_size_in_sectors * bps;
 
-    uint8_t *fat1 = malloc(fat_size_in_bytes);
-    uint8_t *fat2 = malloc(fat_size_in_bytes);
+    uint8_t *fat1 = calloc(1, fat_size_in_bytes);
+    uint8_t *fat2 = calloc(1, fat_size_in_bytes);
     *fat1_ptr = fat1;
     *fat2_ptr = fat2;
 
@@ -743,25 +742,6 @@ void copy_fats_into_memory(int fp, int fs_type, struct fat_boot_sector* fat_sect
         printf("Total # of discrepencies identified between FAT1 and FAT2: %ju\n", diff);
 }
 
-
-/**
- * @brief Function traverses Long File Name (LFN) entires within the FAT32 file system to find the Short
- * File Name (SFN) entry which actually contains the information like time stamps, size, and first cluster.
- * 
- * @param fp File Pointer to the disk image
- * @return uint32_t The offset to the short file name record
- */
-uint32_t traverse_lfn_entries(int fp, uint32_t offset){
-    uint32_t current_lfn_offset = 0;
-    uint32_t current_entry_attribute = 0;
-    do{
-        if (pread(fp, &current_entry_attribute, 1, offset + FILE_ATTRIBUTES + current_lfn_offset) < 0)
-            read_error();
-        current_lfn_offset += 32; //increment to the next directory entry
-    } while (current_entry_attribute == FLAG_FAT_LONG_FILE_NAME);
-    return (current_lfn_offset - 32);
-}
-
 /**
  * @brief Returns the value stored within a given FAT table entry
  * 
@@ -769,7 +749,13 @@ uint32_t traverse_lfn_entries(int fp, uint32_t offset){
  * @return uint32_t 
  */
 
-uint32_t read_fat_entry(uint32_t cluster){
+uint32_t read_alloctable(uint32_t cluster){
+    /*
+    if (cluster > (fat_size_in_bytes/4)){
+        fprintf(stderr, "Fatal Error.  Attempting to read a FAT entry that doesn't exist.  Program terminated.\n");
+        exit(EXIT_FAILURE);
+    }
+    */
     if (fat_bs->is_fat32){
         uint32_t *fat32 = (uint32_t *) fat1;
         return fat32[cluster];
@@ -782,46 +768,6 @@ uint32_t read_fat_entry(uint32_t cluster){
 }
 
 /**
- * @brief Loads a fat_dir_entry struct with directory entry info
- * 
- * @param fp file pointer to disk image
- * @param entry pointer to entry struct to store read information
- * @param offset 
- * @return uint32_t 
- */
-uint32_t read_fat_dir_entry(int fp, struct fat_dir_entry *entry, uint32_t offset){
-    // Traverse the LFN entries to get to the SFN entry
-    uint32_t LFN = traverse_lfn_entries(fp, offset);
-
-    if (pread(fp, entry->info.filename, 11, offset + LFN + FILE_NAME) < 0)
-        read_error();
-    if (pread(fp, &entry->file_attributes, 1, offset + LFN + FILE_ATTRIBUTES) < 0)
-        read_error();
-    if (pread(fp, &entry->created_time_tenths, 1, offset + LFN + CREATED_TIME_TENTHS) < 0)
-        read_error();
-    if (pread(fp, &entry->created_time_hms, 2, offset + LFN + CREATED_TIME_HMS) < 0)
-        read_error();
-    if (pread(fp, &entry->created_day, 2, offset + LFN + CREATED_DAY) < 0)
-        read_error();
-    if (pread(fp, &entry->accessed_day, 2, offset + LFN + ACCESSED_DAY) < 0)
-        read_error();
-    if (pread(fp, &entry->low_cluster_addr, 2, offset + LFN + LOW_CLUSTER_ADDR) < 0)
-        read_error();
-    if (pread(fp, &entry->high_cluster_addr, 2, offset + LFN + HIGH_CLUSTER_ADDR) < 0)
-        read_error();
-
-    entry->cluster_addr = entry->low_cluster_addr | (entry->high_cluster_addr << 16);
-    
-    if (pread(fp, &entry->written_time_hms, 2, offset + LFN + WRITTEN_TIME_HMS) < 0)
-        read_error();
-    if (pread(fp, &entry->written_day, 2, offset + LFN + WRITTEN_DAY) < 0)
-        read_error();
-    if (pread(fp, &entry->file_size, 4, offset + LFN + FILE_SIZE) < 0)
-        read_error();
-    return LFN + 32;
-}
-
-/**
  * @brief Returns the number of clusters a file or directory takes up on the disk.  It does this by
  * traversing the FAT until it hits an EOF marker.
  * 
@@ -830,11 +776,11 @@ uint32_t read_fat_dir_entry(int fp, struct fat_dir_entry *entry, uint32_t offset
  */
 uint32_t get_entry_size(uint32_t cluster){
     uint32_t next_cluster = cluster;
-    uint32_t size = 1;
+    uint32_t size = 0;
 
     if(fat_bs->is_fat32){
         do{
-            next_cluster = read_fat_entry(next_cluster);
+            next_cluster = read_alloctable(next_cluster);
             size++;
         } while (next_cluster < (uint32_t)FAT32_EOF);
     }
@@ -842,38 +788,226 @@ uint32_t get_entry_size(uint32_t cluster){
 }
 
 /**
- * @brief Returns the clusters a file or directory occupies up on the disk.  It does this by
- * traversing the FAT until it hits an EOF marker.
+ * @brief Stores a list of the clusters a file or directory occupies up on the disk into a read_parameter
+ * structure.  It does this by traversing the FAT until it hits an EOF marker.
  * 
  * @param cluster The starting cluster
  * @param cluster_list A poiner to a block/array to store the list of clusters
  * @param max_length Since we pre-allocated memory for the list, this is a safety check to avoid overrunning the buffer
  * @return uint32_t 
  */
-void get_fat32_entry_clusters(uint32_t cluster, uint32_t *cluster_list, uint32_t max_length){
-    uint32_t next_cluster = cluster;
+void get_cluster_list(struct read_parameters *read){
+    uint32_t next_cluster = read->start_cluster;
     uint32_t size = 0;
     do{
-        cluster_list[size] = next_cluster;
-        next_cluster = read_fat_entry(next_cluster);
-        //printf("Next Cluster: %zu\n", next_cluster);
+        read->cluster_list[size] = next_cluster;
+        next_cluster = read_alloctable(next_cluster);
         size++;
-    } while (next_cluster < FAT32_EOF && size < max_length);
+    } while (next_cluster < FAT32_EOF && size < read->list_length);
 }
 
-struct fat_dir_entry* read_fat32_filesystem(int fp, uint32_t entry_start_cluster){    
-    uint32_t dir_size = get_entry_size(entry_start_cluster);
-    uint32_t *dir_cluster_list = calloc(dir_size, sizeof(uint32_t));
-    struct fat_dir_entry *entry = calloc(1, sizeof(struct fat_dir_entry));
-    get_fat32_entry_clusters(entry_start_cluster, dir_cluster_list, dir_size);
+/**
+ * @brief Returns the last cluster used by a file
+ * 
+ * @param cluster The starting cluster
+ * @param cluster_list A poiner to a block/array to store the list of clusters
+ * @param max_length Since we pre-allocated memory for the list, this is a safety check to avoid overrunning the buffer
+ * @return uint32_t 
+ */
+uint32_t get_last_cluster(uint32_t first_cluster){
+    struct read_parameters read;
+    read.start_cluster = first_cluster;
+    // Get the number of clusters the directory is usings
+    read.list_length = get_entry_size(read.start_cluster);
+    // Allocate room to store the list of clusters used by the directory/file
+    read.cluster_list = calloc(read.list_length, sizeof(uint32_t));
+    get_cluster_list(&read);
+    return read.cluster_list[read.list_length - 1];
+}
+/**
+ * @brief Wrapper function for pread when working in clustered area of the disk.  Has additional logic to 
+ * handle moving read position to the next cluster when files/directories span multiple clusters.
+ * 
+ * @param fp 
+ * @param buffer 
+ * @param length 
+ * @param offset 
+ * @param read 
+ */
+void read_disk(int fp, void* buffer, int length, uint32_t field_offset, struct read_parameters* read){
+    uint32_t cluster_list_index = (field_offset + read->entry_offset) / (bps * spc);
     
-    entry->last_cluster = dir_cluster_list[dir_size-1];
+    // printf("Cluster: %d\n", read->cluster_list[cluster_list_index]);
+    uint32_t i = length;
+    uint32_t iteration_read_len = 0;
+    // uint32_t cluster_offset = 0;
+    do{
+        if (i == length){ //means this is our first iteration through the loop
+            if (i > (bps * spc))
+                iteration_read_len = (bps * spc) - field_offset + read->entry_offset;
+            else
+                iteration_read_len = i;
+            //if (pread(fp, buffer + (length - i), iteration_read_len, cts(read->cluster_list[cluster_list_index]) + field_offset + read->entry_offset) < 0)
+            if (cluster_list_index == 0){
+                if (pread(fp, buffer + (length - i), iteration_read_len, cts(read->cluster_list[cluster_list_index]) + field_offset + read->entry_offset) < 0)
+                    read_error();
+            }
+            else{
+                 if (pread(fp, buffer + (length - i), iteration_read_len, cts(read->cluster_list[cluster_list_index]) + field_offset) < 0)
+                    read_error();
+            }
+            i -= iteration_read_len;
+            cluster_list_index++;
+        }
+        else{
+            //set iteration_read_length equal to the size of a clutser, or however many bytes should be in the last partially filled cluster
+            if ((bps * spc) < i)
+                iteration_read_len = bps * spc;
+            else
+                iteration_read_len = i; 
+            if (pread(fp, buffer + (length - i), iteration_read_len, cts(read->cluster_list[cluster_list_index])) < 0)
+                read_error();
+            i -= iteration_read_len;
+            cluster_list_index++;
+        }
+    } while (i > 0 && cluster_list_index < read->list_length);
+}
 
+/**
+ * @brief Function walks Long File Name (LFN) entires within the FAT32 file system to find the Short
+ * File Name (SFN) entry which actually contains the information like time stamps, size, and first cluster.
+ * 
+ * @param fp File Pointer to the disk image
+ * @return uint32_t The offset to the short file name record
+ */
+uint32_t walk_lfn_entries(int fp, struct read_parameters* read){
+    uint32_t current_lfn_offset = 0;
+    uint32_t current_entry_attribute = 0;
+    do{
+        read_disk(fp, &current_entry_attribute, 1, FILE_ATTRIBUTES + current_lfn_offset, read);
+        current_lfn_offset += 32; //increment to the next directory entry
+    } while (current_entry_attribute == FLAG_FAT_LONG_FILE_NAME);
+    return (current_lfn_offset - 32);
+}
 
-    free(dir_cluster_list);
+/**
+ * @brief Loads a fat_dir_entry struct with directory entry info
+ * 
+ * @param fp file pointer to disk image
+ * @param entry pointer to entry struct to store read information
+ * @param offset in bytes, the offset within the disk image where the dir entry starts
+ * @return uint32_t Return the offset to the next file record entry
+ */
+uint32_t read_fat_dir_entry(int fp, struct fat_dir_entry *entry, struct read_parameters* read){
+    // Traverse the LFN entries to get to the SFN entry
+    uint32_t LFN = walk_lfn_entries(fp, read);
+
+    read_disk(fp, &entry->info.filename, 11, LFN + FILE_NAME, read);
+    read_disk(fp, &entry->file_attributes, 1, LFN + FILE_ATTRIBUTES, read);
+    read_disk(fp, &entry->created_time_tenths, 1, LFN + CREATED_TIME_TENTHS, read);
+    read_disk(fp, &entry->created_time_hms, 2, LFN + CREATED_TIME_HMS, read);
+    read_disk(fp, &entry->created_day, 2, LFN + CREATED_DAY, read);
+    read_disk(fp, &entry->accessed_day, 2, LFN + ACCESSED_DAY, read);
+    read_disk(fp, &entry->low_cluster_addr, 2,  LFN + LOW_CLUSTER_ADDR, read);
+    read_disk(fp, &entry->high_cluster_addr, 2,  LFN + HIGH_CLUSTER_ADDR, read);
+    entry->cluster_addr = entry->low_cluster_addr | (entry->high_cluster_addr << 16);
+    read_disk(fp, &entry->written_time_hms, 2, LFN + WRITTEN_TIME_HMS, read);
+    read_disk(fp, &entry->written_day, 2, LFN + WRITTEN_DAY, read);
+    read_disk(fp, &entry->file_size, 4, LFN + FILE_SIZE, read);
+
+    return LFN + 32;
+}
+
+void check_for_hidden_data(int fp, struct fat_dir_entry *entry){
+    uint32_t slack_start = entry->file_size % (bps * spc);
+    uint32_t last_sector_start = cts(entry->last_cluster);
+    // printf("Slack Start: 0x%x\n", slack_start);
+    uint32_t hidden_found = 0;
+    uint8_t buf = 0;
+
+    // printf("Checking %s\n", entry->info.filename);
+    /*
+    printf("File first cluster: %d\n", entry->cluster_addr);
+    printf("File last cluster: %d\n", entry->last_cluster);
+    printf("Starting to look for hidden data at: %x\n", last_sector_start + slack_start);
+    */
+    for (uint32_t i = slack_start; i < (bps * spc); i++){
+        if (pread(fp, &buf, 1, last_sector_start + i) < 0)
+            read_error();
+        hidden_found = hidden_found | buf;
+        // printf("%x", buf);
+    }
+    if (hidden_found){
+        hidden_data_found = true; // mark the global var as true
+        printf("Possible hidden data found in the slack space of %s in sector 0x%x / cluster: 0x%x\n\n", entry->info.filename, cts(entry->last_cluster), entry->last_cluster);
+    }
+}
+
+/**
+ * @brief Recursively reads a FAT32 file system directory/file structure into memory
+ * 
+ * @param fp 
+ * @param entry_start_cluster 
+ * @return struct fat_dir_entry* 
+ */
+struct fat_dir_entry* read_fat32_filesystem(int fp, uint32_t entry_start_cluster, struct fat_dir_entry *entry){
+    //-------------------------------------------------------------------------
+    // First setup the data structures and get info like number of clusters
+    // used by the current directory we will be reading
+    //-------------------------------------------------------------------------
+    // Allocate the struct to store the next file/directory information
+    struct read_parameters read_info = {0};
+    // Get the number of clusters the directory is usings
+    read_info.start_cluster = entry_start_cluster;
+    // Get the number of clusters the directory is usings
+    read_info.list_length = get_entry_size(entry_start_cluster);
+    // Allocate room to store the list of clusters used by the directory/file
+    read_info.cluster_list = calloc(read_info.list_length, sizeof(uint32_t));
+    // Get the list of clusters the directory is usings
+    get_cluster_list(&read_info);
+
+    // Special case for root dir since a parent entry* cant be passed to the first call
+    if (entry == NULL){
+        entry = calloc(1, sizeof(struct fat_dir_entry));
+    }
+    
+    // Store the last cluster for future reference to save us time 
+    entry->last_cluster = read_info.cluster_list[read_info.list_length-1];
+
+    //-------------------------------------------------------------------------
+    // Begin reading the contents of the directory (entries) into memory, 
+    // recurse for directories
+    //-------------------------------------------------------------------------
+    for (uint32_t i = 0; i < read_info.list_length * bps * spc;){
+        // Allocate the struct to store the next file/directory information
+        struct fat_dir_entry *sub_entry = calloc(1, sizeof(struct fat_dir_entry));
+        // Read the file/directory entry
+        int x = read_fat_dir_entry(fp, sub_entry, &read_info);
+        sub_entry->last_cluster = get_last_cluster(sub_entry->cluster_addr);
+        // If the entry was blank, marked unallocated, or was the . entry (self pointer), skip to next entry
+        if (sub_entry->info.alloc_status == 0 || sub_entry->info.alloc_status == UNALLOCATED || !strncmp(sub_entry->info.filename, ".          ", 12) || !strncmp(sub_entry->info.filename, "..         ", 12)){
+            free(sub_entry);
+            read_info.entry_offset += x;
+            i += x;
+            continue;
+        }
+        // If the entry we just read is a directory, we need to recurse into the directory
+        if (sub_entry->file_attributes & 0x10){    
+            sub_entry->is_directory = true;
+            // printf("i is: %x.  Jumping to read the dir: %s\n", i, sub_entry->info.filename);
+            read_fat32_filesystem(fp, sub_entry->cluster_addr, sub_entry);
+        }
+        // If the user specified the -h flag, check for hidden data in the slack space of the last cluster
+        if (args.h_flag && !sub_entry->is_directory){
+            check_for_hidden_data(fp, sub_entry);
+        }
+        read_info.entry_offset += x;
+        i += x;
+    }
+
+    free(read_info.cluster_list);
     return entry;
 }
-
 
 /**
  * @brief 
@@ -883,11 +1017,11 @@ struct fat_dir_entry* read_fat32_filesystem(int fp, uint32_t entry_start_cluster
  * @return int 
  */
 int main(int argc, char *argv[]){
-    cmd_line args = {0};
     int fp = 0;
     int fs_type = 0;
     root_dir_off = 0;
     struct mbr_sector* mbr = calloc(1, sizeof(struct mbr_sector));
+    struct fat_dir_entry *root_dir;
 
     read_args(&args, argc, argv);
     verify_fs_arg(&args);
@@ -903,7 +1037,6 @@ int main(int argc, char *argv[]){
 
     if (fs_type == FAT32 || fs_type == FAT16 || fs_type == FAT12){
         fat_bs = calloc(1, sizeof(struct fat_boot_sector));
-        struct fat_dir_entry *root_dir;
         read_fat_boot_sector(fp, fat_bs, 0);
         validate_fat_boot_sector(fat_bs);
         print_fat_boot_sector_info(fat_bs);
@@ -914,13 +1047,14 @@ int main(int argc, char *argv[]){
 
         if(fs_type == FAT32){
             root_dir_off = cts(fat_bs->root_dir_cluster);
-            cluster2_off = reserved_and_fats;
             printf("Starting to read Fat32 filesystem.\n");
-            root_dir = read_fat32_filesystem(fp, fat_bs->root_dir_cluster);
+            root_dir = read_fat32_filesystem(fp, fat_bs->root_dir_cluster, NULL);
+            if (args.h_flag && !hidden_data_found){
+                printf("Completed reading file system.  No data was located in the slack regions of allocated clusters.\n");
+            }
         }
         if(fs_type == FAT16){
             root_dir_off = fat_bs->number_of_fats * (fat_bs->fat_size_in_sectors * bps) + (fat_bs->reserved_area_size * bps);
-            cluster2_off = reserved_and_fats + fat_bs->max_files_in_root * 32;
         }
     }
 
@@ -935,6 +1069,8 @@ int main(int argc, char *argv[]){
         free(fat1);
     if (fat2 != NULL)
         free(fat2);
+    if (root_dir != NULL)
+        free(root_dir);
     
     //Need to add code to cleanup MBR Table structs
 }

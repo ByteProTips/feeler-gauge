@@ -16,6 +16,11 @@ const char cmd_line_error[] = "-i <path_to_disk_image> -f <file_system_type> -v 
                         "\nCurrently Supported file system types:\n <fat16>\n <fat32>\n" \
                         " <raw> (For Full Disk Images that include the MBR. Not for use with images of a single partitions.)\n\n";
 
+void read_error(void) {
+    fprintf(stderr, "Unable to read disk image. Please make sure the file has not been moved or deleted.\n");
+    exit(EXIT_FAILURE);
+}
+
 // Text Headers when printing MBR to console
 const char header[7][10] = {
     "ENTRY#",
@@ -32,10 +37,11 @@ uint32_t bps = 0; // Bytes Per Sector
 uint32_t spc = 0; // Sectors Per Cluster
 uint32_t reserved_and_fats = 0;
 uint32_t root_dir_off; // Offset in Bytes from start of disk image
-uint32_t cluster2_off;
+// uint32_t cluster2_off;
 struct fat_boot_sector* fat_bs;
 uint8_t *fat1;
 uint8_t *fat2;
+uint32_t fat_size_in_bytes;
 
 /**
  * @brief Common partition type codes for MBR entries
@@ -183,6 +189,7 @@ typedef struct cmd_line {
     bool i_flag; // disk image path flag
     bool f_flag; // file system format flag
     bool v_flag; // verbose flag
+    bool h_flag; // hidden flag
 
     // Flag values
     char argv0[255];
@@ -259,7 +266,7 @@ typedef struct fat_boot_sector {
 } fat_boot_sector;
 
 typedef struct fat_dir_entry{
-    bool directory;
+    bool is_directory;
     union {
         char alloc_status;
         char filename[12];
@@ -277,15 +284,24 @@ typedef struct fat_dir_entry{
     uint32_t file_size; // in bytes
     uint32_t last_cluster; // Store the last cluster of the file/dir for feeler gauge checks
 
-    // Double Linked List of parent and child directories
+    // Linked List of parent
     struct fat_dir_entry* parent_dir;
+
+    // Linked List to files and subfolders
     struct fat_dir_entry* dir_contents;
 
-    // Double linked list of all files in the same directory
-    struct fat_dir_entry* next_file;
-    struct fat_dir_entry* previous_file;
+    // Double linked list of all files/folders within the same directory
+    struct fat_dir_entry* next;
+     struct fat_dir_entry* prev;
+
 } fat_dir_entry;
 
+typedef struct read_parameters{
+    uint32_t start_cluster; // cluster where the file/data to be read begins
+    uint32_t *cluster_list; // list of clusters that contain the other segments of the file
+    uint32_t list_length; // # of clusters in the list
+    uint32_t entry_offset; // offset within the custer to begin reading (used for directory entries)
+} read_parameters;
 
 /**
  * @brief Lookup table for partition code -> txt string
