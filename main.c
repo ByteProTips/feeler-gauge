@@ -40,7 +40,7 @@ int read_args(struct cmd_line *args, int argc, char *argv[]) {
 
     strncpy(args->argv0, argv[0], 255);
 
-    while ((opt = getopt(argc, argv, "i:f:v:h")) != -1) {
+    while ((opt = getopt(argc, argv, "i:f:vh")) != -1) {
         switch (opt) {
         case 'i':
             args->i_flag = true;
@@ -918,6 +918,12 @@ uint32_t read_fat_dir_entry(int fp, struct fat_dir_entry *entry, struct read_par
     return LFN + 32;
 }
 
+/**
+ * @brief Checks for data hidden at the end of a partially filled FAT32 cluster
+ * 
+ * @param fp 
+ * @param entry 
+ */
 void check_for_hidden_data(int fp, struct fat_dir_entry *entry){
     uint32_t slack_start = entry->file_size % (bps * spc);
     uint32_t last_sector_start = cts(entry->last_cluster);
@@ -1009,6 +1015,55 @@ struct fat_dir_entry* read_fat32_filesystem(int fp, uint32_t entry_start_cluster
     return entry;
 }
 
+
+/**
+ * @brief Checks the space between partitions on a disk image for hidden data.
+ * 
+ * @param fp 
+ * @param mbr 
+ */
+void check_slack_space(int fp, struct mbr_sector *mbr){
+    uint8_t buf = 0;
+    uint8_t hidden_found = 0;
+
+    printf("\nChecking partition slack space for hidden data...\n");
+
+    if (mbr->entry[0].starting_sector > 0){
+        for (uint32_t i = 512; i < (mbr->entry[0].starting_sector * bps); i++){
+            if (pread(fp, &buf, 1, i) < 0)
+                read_error();
+            // printf("Reading address: 0x%x     Buffer: 0x%x\n", i, buf);
+            hidden_found = hidden_found | buf;
+            // printf("Hidden Found: 0x%x\n", hidden_found);
+        }
+        if (hidden_found){
+            printf("Data potentially hidden before partition entry 0.\n");
+        }
+    }
+
+    for (int i = 0; i < 3; i++){
+        buf = 0;
+        uint8_t save_hidden_found = hidden_found;
+        hidden_found = 0;
+        if ((mbr->entry[i].starting_sector + mbr->entry[i].partition_size) < mbr->entry[i+1].starting_sector){
+            for (uint32_t i = mbr->entry[i].starting_sector + mbr->entry[i].partition_size * bps; i < mbr->entry[i+1].starting_sector * bps; i++){
+                if (pread(fp, &buf, 1, i) < 0)
+                    read_error();
+                // printf("Reading address: 0x%x     Buffer: 0x%x\n", i, buf);
+                hidden_found = hidden_found | buf;
+            }
+                if (hidden_found){
+                    printf("Data potentially hidden between partition entries %i and %i.\n", i, i+1);
+            }
+        }
+        hidden_found = hidden_found | save_hidden_found;
+    }
+
+    if (!hidden_found){
+        printf("No data was hidden in the space between the partitions of this disk image.\n");
+    }
+}
+
 /**
  * @brief 
  * 
@@ -1033,6 +1088,8 @@ int main(int argc, char *argv[]){
     if (fs_type == RAW){
         read_mbr_sector(fp, mbr);
         print_mbr_info(mbr);
+        if (args.h_flag)
+            check_slack_space(fp, mbr);
     }
 
     if (fs_type == FAT32 || fs_type == FAT16 || fs_type == FAT12){
@@ -1047,8 +1104,10 @@ int main(int argc, char *argv[]){
 
         if(fs_type == FAT32){
             root_dir_off = cts(fat_bs->root_dir_cluster);
-            printf("Starting to read Fat32 filesystem.\n");
-            root_dir = read_fat32_filesystem(fp, fat_bs->root_dir_cluster, NULL);
+            if (args.h_flag){
+                printf("Starting to read Fat32 filesystem.\n");
+                root_dir = read_fat32_filesystem(fp, fat_bs->root_dir_cluster, NULL);
+            }
             if (args.h_flag && !hidden_data_found){
                 printf("Completed reading file system.  No data was located in the slack regions of allocated clusters.\n");
             }

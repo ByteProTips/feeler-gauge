@@ -10,10 +10,9 @@
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
-#include <linux/magic.h> // Used for file header/footer magic numbers
 
-const char cmd_line_error[] = "-i <path_to_disk_image> -f <file_system_type> -v {run in verbose mode}\n" \
-                        "\nCurrently Supported file system types:\n <fat16>\n <fat32>\n" \
+const char cmd_line_error[] = "-i <path_to_disk_image> -f <file_system_type> -v {run in verbose mode} -h {search for hidden data}\n" \
+                        "\nCurrently Supported file system types:\n <fat12>\n <fat16>\n <fat32>\n" \
                         " <raw> (For Full Disk Images that include the MBR. Not for use with images of a single partitions.)\n\n";
 
 void read_error(void) {
@@ -33,7 +32,7 @@ const char header[7][10] = {
 };
 
 // Global Data / Data Structures
-uint32_t bps = 0; // Bytes Per Sector
+uint32_t bps = 512; // Bytes Per Sector
 uint32_t spc = 0; // Sectors Per Cluster
 uint32_t reserved_and_fats = 0;
 uint32_t root_dir_off; // Offset in Bytes from start of disk image
